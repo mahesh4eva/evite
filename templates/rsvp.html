@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block title %}RSVP | Evite App{% endblock %}
+
+{% block content %}
+<div class="bg-white shadow overflow-hidden sm:rounded-lg max-w-2xl mx-auto">
+    <div class="px-4 py-5 sm:px-6">
+        <h2 class="text-2xl font-bold leading-7 text-gray-900 sm:text-3xl sm:truncate">
+            RSVP for {{ invitation.event_name }}
+        </h2>
+    </div>
+    <div class="border-t border-gray-200 px-4 py-5 sm:p-6">
+        <p class="mb-4 text-gray-700">Dear {{ guest.name }},</p>
+        <p class="mb-4 text-gray-700">You are invited to {{ invitation.event_name }} on {{ invitation.event_date.strftime('%B %d, %Y') }}.</p>
+        {% if invitation.description %}
+            <p class="mb-4 text-gray-700">{{ invitation.description | safe }}</p>
+        {% endif %}
+        <p class="mb-4 text-gray-700">Location: {{ invitation.location }}</p>
+        {% if invitation.theme %}
+            <p class="mb-4 text-gray-700">Theme: {{ invitation.theme }}</p>
+        {% endif %}
+        {% if invitation.image_path %}
+            <img src="{{ url_for('static', filename=invitation.image_path) }}" alt="Invitation Image" class="mb-4 max-w-full h-auto rounded-lg shadow-md">
+        {% endif %}
+        <form method="POST" class="mt-8">
+            <div class="flex items-center mb-4">
+                <input id="rsvp_yes" name="rsvp" type="radio" value="yes" class="focus:ring-indigo-500 h-4 w-4 text-indigo-600 border-gray-300" {% if guest.rsvp %}checked{% endif %}>
+                <label for="rsvp_yes" class="ml-3 block text-sm font-medium text-gray-700">
+                    Yes, I will attend
+                </label>
+            </div>
+            <div class="flex items-center mb-4">
+                <input id="rsvp_no" name="rsvp" type="radio" value="no" class="focus:ring-indigo-500 h-4 w-4 text-indigo-600 border-gray-300" {% if guest.rsvp is sameas false %}checked{% endif %}>
+                <label for="rsvp_no" class="ml-3 block text-sm font-medium text-gray-700">
+                    No, I cannot attend
+                </label>
+            </div>
+            <div class="mt-6">
+                <button type="submit" class="inline-flex justify-center py-2 px-4 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                    Submit RSVP
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
