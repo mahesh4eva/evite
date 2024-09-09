@@ -1,25 +1,27 @@
 from flask import Flask, request, render_template, redirect, url_for, flash, jsonify
 from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
 from flask_mail import Mail, Message
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from datetime import datetime
 import os
-from flask_mail import Mail, Message
+import re
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = ""
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your_secret_key')
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///evite.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['UPLOAD_FOLDER'] = 'static/uploads'
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
 app.config['MAIL_PORT'] = 587
 app.config['MAIL_USE_TLS'] = True
-app.config['MAIL_USERNAME'] = ""
-app.config['MAIL_PASSWORD'] = ""
-app.config['MAIL_DEFAULT_SENDER'] = os.environ.get('MAIL_DEFAULT_SENDER')
+app.config['MAIL_USERNAME'] = os.environ.get('MAIL_USERNAME')
+app.config['MAIL_PASSWORD'] = os.environ.get('MAIL_PASSWORD')
 
 db = SQLAlchemy(app)
+migrate = Migrate(app, db)
 mail = Mail(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
@@ -47,14 +49,16 @@ class Invitation(db.Model):
     location = db.Column(db.String(200))
     theme = db.Column(db.String(100))
 
-
 class Guest(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     invitation_id = db.Column(db.Integer, db.ForeignKey('invitation.id'), nullable=False)
     name = db.Column(db.String(100), nullable=False)
     email = db.Column(db.String(120), nullable=False)
-    rsvp = db.Column(db.Boolean, default=False)
-    rsvp_date = db.Column(db.DateTime)
+    rsvp = db.Column(db.Boolean, nullable=True)
+    rsvp_date = db.Column(db.DateTime, nullable=True)
+
+    def __repr__(self):
+        return f'<Guest {self.name}>'
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -64,7 +68,12 @@ def send_invitation_email(invitation, guest):
     msg = Message(f"You're invited to {invitation.event_name}!",
                   recipients=[guest.email])
     
-    msg.html = render_template('email_template.html', invitation=invitation, guest=guest)
+    rsvp_link = url_for('rsvp', token=guest.id, _external=True)
+    
+    msg.html = render_template('email_template.html', 
+                               invitation=invitation, 
+                               guest=guest, 
+                               rsvp_link=rsvp_link)
     
     try:
         mail.send(msg)
@@ -124,18 +133,17 @@ def create_invitation():
         db.session.commit()
         
         # Process guest list
-        guest_names = request.form.getlist('guest_names[]')
-        guest_emails = request.form.getlist('guest_emails[]')
+        guest_list = request.form.get('guest_list', '')
+        guests = re.findall(r'([^,\n]+),\s*([^,\n]+@[^,\n]+)', guest_list)
         
-        for name, email in zip(guest_names, guest_emails):
-            if email:  # Ensure we at least have an email
-                guest = Guest(invitation_id=invitation.id, name=name.strip() or None, email=email.strip())
-                db.session.add(guest)
-                db.session.commit()
-                send_invitation_email(invitation, guest)
+        for name, email in guests:
+            guest = Guest(invitation_id=invitation.id, name=name.strip(), email=email.strip())
+            db.session.add(guest)
+            db.session.commit()
+            send_invitation_email(invitation, guest)
         
         flash('Invitation created and emails sent successfully!')
-        return render_template('invitation_created.html')
+        return redirect(url_for('dashboard'))
     
     return render_template('create_invitation.html')
 
@@ -179,39 +187,6 @@ def delete_invitation(invitation_id):
     flash('Invitation deleted successfully!')
     return redirect(url_for('dashboard'))
 
-@app.route('/manage_guests/<int:invitation_id>', methods=['GET', 'POST'])
-@login_required
-def manage_guests(invitation_id):
-    invitation = Invitation.query.get_or_404(invitation_id)
-    if invitation.user_id != current_user.id:
-        flash('You do not have permission to manage guests for this invitation.')
-        return redirect(url_for('dashboard'))
-
-    if request.method == 'POST':
-        name = request.form['name']
-        email = request.form['email']
-        guest = Guest(invitation_id=invitation_id, name=name, email=email)
-        db.session.add(guest)
-        db.session.commit()
-        flash('Guest added successfully!')
-
-    guests = Guest.query.filter_by(invitation_id=invitation_id).all()
-    return render_template('manage_guests.html', invitation=invitation, guests=guests)
-
-@app.route('/remove_guest/<int:guest_id>', methods=['POST'])
-@login_required
-def remove_guest(guest_id):
-    guest = Guest.query.get_or_404(guest_id)
-    invitation = Invitation.query.get(guest.invitation_id)
-    if invitation.user_id != current_user.id:
-        flash('You do not have permission to remove this guest.')
-        return redirect(url_for('dashboard'))
-
-    db.session.delete(guest)
-    db.session.commit()
-    flash('Guest removed successfully!')
-    return redirect(url_for('manage_guests', invitation_id=invitation.id))
-
 @app.route('/preview_invitation/<int:invitation_id>')
 @login_required
 def preview_invitation(invitation_id):
@@ -241,20 +216,6 @@ def send_invitations(invitation_id):
     flash('Invitations sent successfully!')
     return redirect(url_for('dashboard'))
 
-@app.route('/rsvp/<int:guest_id>', methods=['GET', 'POST'])
-def rsvp(guest_id):
-    guest = Guest.query.get_or_404(guest_id)
-    invitation = Invitation.query.get(guest.invitation_id)
-
-    if request.method == 'POST':
-        guest.rsvp = request.form['rsvp'] == 'yes'
-        guest.rsvp_date = datetime.utcnow()
-        db.session.commit()
-        flash('Thank you for your RSVP!')
-        return redirect(url_for('rsvp', guest_id=guest_id))
-    
-    return render_template('rsvp.html', guest=guest, invitation=invitation)
-
 @app.route('/rsvp_status/<int:invitation_id>')
 @login_required
 def rsvp_status(invitation_id):
@@ -265,26 +226,6 @@ def rsvp_status(invitation_id):
 
     guests = Guest.query.filter_by(invitation_id=invitation_id).all()
     return render_template('rsvp_status.html', invitation=invitation, guests=guests)
-
-@app.route('/send_reminders/<int:invitation_id>')
-@login_required
-def send_reminders(invitation_id):
-    invitation = Invitation.query.get_or_404(invitation_id)
-    if invitation.user_id != current_user.id:
-        flash('You do not have permission to send reminders for this event.')
-        return redirect(url_for('dashboard'))
-
-    guests = Guest.query.filter_by(invitation_id=invitation_id, rsvp=False).all()
-    
-    for guest in guests:
-        msg = Message(f"Reminder: RSVP for {invitation.event_name}",
-                      sender=app.config['MAIL_USERNAME'],
-                      recipients=[guest.email])
-        msg.html = render_template('reminder_email_template.html', invitation=invitation, guest=guest)
-        mail.send(msg)
-    
-    flash('Reminders sent successfully!')
-    return redirect(url_for('rsvp_status', invitation_id=invitation_id))
 
 @app.route('/signup', methods=['GET', 'POST'])
 def signup():
@@ -325,6 +266,109 @@ def upload_image():
         filename = secure_filename(file.filename)
         file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
         return jsonify({'filename': os.path.join('uploads', filename)}), 200
+
+@app.route('/manage_guests/<int:invitation_id>', methods=['GET', 'POST'])
+@login_required
+def manage_guests(invitation_id):
+    invitation = Invitation.query.get_or_404(invitation_id)
+    if invitation.user_id != current_user.id:
+        flash('You do not have permission to manage guests for this invitation.')
+        return redirect(url_for('dashboard'))
+
+    if request.method == 'POST':
+        name = request.form['name']
+        email = request.form['email']
+        guest = Guest(invitation_id=invitation_id, name=name, email=email)
+        db.session.add(guest)
+        db.session.commit()
+        flash('Guest added successfully!')
+
+    guests = Guest.query.filter_by(invitation_id=invitation_id).all()
+    print(f"Fetched {len(guests)} guests for invitation {invitation_id}")  # Debug output
+    for guest in guests:
+        print(f"Guest: {guest.name}, {guest.email}")  # Debug output
+
+    return render_template('manage_guests.html', invitation=invitation, guests=guests)
+
+@app.route('/view_rsvps/<int:invitation_id>')
+@login_required
+def view_rsvps(invitation_id):
+    invitation = Invitation.query.get_or_404(invitation_id)
+    if invitation.user_id != current_user.id:
+        flash('You do not have permission to view RSVPs for this invitation.')
+        return redirect(url_for('dashboard'))
+
+    guests = Guest.query.filter_by(invitation_id=invitation_id).all()
+    return render_template('view_rsvps.html', invitation=invitation, guests=guests)
+
+@app.route('/remove_guest/<int:guest_id>', methods=['POST'])
+@login_required
+def remove_guest(guest_id):
+    guest = Guest.query.get_or_404(guest_id)
+    invitation = Invitation.query.get(guest.invitation_id)
+    if invitation.user_id != current_user.id:
+        flash('You do not have permission to remove this guest.')
+        return redirect(url_for('dashboard'))
+
+    db.session.delete(guest)
+    db.session.commit()
+    flash('Guest removed successfully!')
+    return redirect(url_for('manage_guests', invitation_id=invitation.id))
+
+from datetime import datetime
+
+@app.route('/rsvp/<token>', methods=['GET', 'POST'])
+def rsvp(token):
+    guest = Guest.query.filter_by(id=token).first_or_404()
+    invitation = Invitation.query.get(guest.invitation_id)
+    
+    if request.method == 'POST':
+        response = request.form.get('response')
+        if response in ['accept', 'decline']:
+            guest.rsvp = (response == 'accept')
+            guest.rsvp_date = datetime.utcnow()
+            db.session.commit()
+            flash('Thank you for your response!', 'success')
+            return redirect(url_for('rsvp', token=token))
+    
+    return render_template('rsvp.html', guest=guest, invitation=invitation)
+
+from flask import url_for, flash, redirect
+from flask_login import login_required, current_user
+
+@app.route('/send_reminders/<int:invitation_id>')
+@login_required
+def send_reminders(invitation_id):
+    invitation = Invitation.query.get_or_404(invitation_id)
+    if invitation.user_id != current_user.id:
+        flash('You do not have permission to send reminders for this invitation.', 'error')
+        return redirect(url_for('dashboard'))
+
+    guests_without_response = Guest.query.filter_by(invitation_id=invitation_id, rsvp=None).all()
+    
+    for guest in guests_without_response:
+        send_reminder_email(invitation, guest)
+
+    flash(f'Reminder emails sent to {len(guests_without_response)} guests.', 'success')
+    return redirect(url_for('view_rsvps', invitation_id=invitation_id))
+
+def send_reminder_email(invitation, guest):
+    msg = Message(f"Reminder: RSVP for {invitation.event_name}",
+                  recipients=[guest.email])
+    
+    rsvp_link = url_for('rsvp', token=guest.id, _external=True)
+    
+    msg.html = render_template('reminder_email_template.html', 
+                               invitation=invitation, 
+                               guest=guest, 
+                               rsvp_link=rsvp_link)
+    
+    try:
+        mail.send(msg)
+        return True
+    except Exception as e:
+        print(f"Failed to send reminder email to {guest.email}: {str(e)}")
+        return False
 
 if __name__ == '__main__':
     with app.app_context():
