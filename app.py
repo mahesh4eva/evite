@@ -1,30 +1,41 @@
-import os
-from datetime import datetime
 from flask import Flask, request, render_template, redirect, url_for, flash, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_mail import Mail, Message
-from werkzeug.utils import secure_filename
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
+from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
+from datetime import datetime
+import os
+from flask_mail import Mail, Message
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your_secret_key'  # Replace with a real secret key
+app.config['SECRET_KEY'] = ""
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///evite.db'
 app.config['UPLOAD_FOLDER'] = 'static/uploads'
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
 app.config['MAIL_PORT'] = 587
 app.config['MAIL_USE_TLS'] = True
-app.config['MAIL_USERNAME'] = os.environ.get('MAIL_USERNAME')
-app.config['MAIL_PASSWORD'] = os.environ.get('MAIL_PASSWORD')
+app.config['MAIL_USERNAME'] = ""
+app.config['MAIL_PASSWORD'] = ""
+app.config['MAIL_DEFAULT_SENDER'] = os.environ.get('MAIL_DEFAULT_SENDER')
 
 db = SQLAlchemy(app)
 mail = Mail(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 
+
 class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
-    password = db.Column(db.String(120), nullable=False)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password_hash = db.Column(db.String(128))
+
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
 
 class Invitation(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -35,6 +46,7 @@ class Invitation(db.Model):
     description = db.Column(db.Text)
     location = db.Column(db.String(200))
     theme = db.Column(db.String(100))
+
 
 class Guest(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -48,11 +60,24 @@ class Guest(db.Model):
 def load_user(user_id):
     return User.query.get(int(user_id))
 
+def send_invitation_email(invitation, guest):
+    msg = Message(f"You're invited to {invitation.event_name}!",
+                  recipients=[guest.email])
+    
+    msg.html = render_template('email_template.html', invitation=invitation, guest=guest)
+    
+    try:
+        mail.send(msg)
+        return True
+    except Exception as e:
+        print(f"Failed to send email to {guest.email}: {str(e)}")
+        return False
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
         user = User.query.filter_by(username=request.form['username']).first()
-        if user and user.password == request.form['password']:  # In a real app, use proper password hashing
+        if user and user.check_password(request.form['password']):
             login_user(user)
             return redirect(url_for('dashboard'))
         flash('Invalid username or password')
@@ -70,6 +95,9 @@ def dashboard():
     invitations = Invitation.query.filter_by(user_id=current_user.id).all()
     return render_template('dashboard.html', invitations=invitations)
 
+# Make sure this is at the top of your file, after other imports
+app.config['UPLOAD_FOLDER'] = os.path.join('static', 'uploads')
+
 @app.route('/create_invitation', methods=['GET', 'POST'])
 @login_required
 def create_invitation():
@@ -79,11 +107,13 @@ def create_invitation():
         description = request.form['description']
         location = request.form['location']
         theme = request.form['theme']
-        image = request.files['image']
+        image = request.files.get('image')
         
-        if image:
+        if image and image.filename != '':
             filename = secure_filename(image.filename)
-            image.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+            os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+            image_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            image.save(image_path)
             image_path = os.path.join('uploads', filename)
         else:
             image_path = None
@@ -93,8 +123,19 @@ def create_invitation():
         db.session.add(invitation)
         db.session.commit()
         
-        flash('Invitation created successfully!')
-        return redirect(url_for('preview_invitation', invitation_id=invitation.id))
+        # Process guest list
+        guest_names = request.form.getlist('guest_names[]')
+        guest_emails = request.form.getlist('guest_emails[]')
+        
+        for name, email in zip(guest_names, guest_emails):
+            if email:  # Ensure we at least have an email
+                guest = Guest(invitation_id=invitation.id, name=name.strip() or None, email=email.strip())
+                db.session.add(guest)
+                db.session.commit()
+                send_invitation_email(invitation, guest)
+        
+        flash('Invitation created and emails sent successfully!')
+        return render_template('invitation_created.html')
     
     return render_template('create_invitation.html')
 
@@ -245,6 +286,33 @@ def send_reminders(invitation_id):
     flash('Reminders sent successfully!')
     return redirect(url_for('rsvp_status', invitation_id=invitation_id))
 
+@app.route('/signup', methods=['GET', 'POST'])
+def signup():
+    if request.method == 'POST':
+        username = request.form['username']
+        email = request.form['email']
+        password = request.form['password']
+        
+        user = User.query.filter_by(username=username).first()
+        if user:
+            flash('Username already exists.')
+            return redirect(url_for('signup'))
+        
+        user = User.query.filter_by(email=email).first()
+        if user:
+            flash('Email already exists.')
+            return redirect(url_for('signup'))
+        
+        new_user = User(username=username, email=email)
+        new_user.set_password(password)
+        db.session.add(new_user)
+        db.session.commit()
+        
+        flash('Congratulations, you are now a registered user!')
+        return redirect(url_for('login'))
+    
+    return render_template('signup.html')
+
 @app.route('/upload_image', methods=['POST'])
 @login_required
 def upload_image():
@@ -259,5 +327,6 @@ def upload_image():
         return jsonify({'filename': os.path.join('uploads', filename)}), 200
 
 if __name__ == '__main__':
-    db.create_all()
+    with app.app_context():
+        db.create_all()
     app.run(debug=True)
