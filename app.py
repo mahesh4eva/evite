@@ -64,23 +64,42 @@ class Guest(db.Model):
 def load_user(user_id):
     return User.query.get(int(user_id))
 
+from flask_mail import Message
+from flask import render_template, url_for
+import logging
+
 def send_invitation_email(invitation, guest):
-    msg = Message(f"You're invited to {invitation.event_name}!",
-                  recipients=[guest.email])
-    
-    rsvp_link = url_for('rsvp', token=guest.id, _external=True)
-    
-    msg.html = render_template('email_template.html', 
-                               invitation=invitation, 
-                               guest=guest, 
-                               rsvp_link=rsvp_link)
-    
     try:
+        # Replace non-breaking spaces with regular spaces for event_name and email
+        event_name = invitation.event_name.replace('\xa0', ' ')
+        guest_email = guest.email.replace('\xa0', ' ')
+
+        # Ensure that strings are UTF-8 encoded (in case there are other non-ASCII characters)
+        event_name_utf8 = event_name.encode('utf-8').decode('utf-8')
+        guest_email_utf8 = guest_email.encode('utf-8').decode('utf-8')
+
+        # Create the email message with UTF-8 encoded strings
+        msg = Message(f"You're invited to {event_name_utf8}!",
+                      recipients=[guest_email_utf8])
+        
+        # Generate RSVP link
+        rsvp_link = url_for('rsvp', token=guest.id, _external=True)
+
+        # Render the email template (Flask-Mail uses UTF-8 by default for email bodies)
+        msg.html = render_template('email_template.html', 
+                                   invitation=invitation, 
+                                   guest=guest, 
+                                   rsvp_link=rsvp_link)
+        
+        # Send the email
         mail.send(msg)
         return True
     except Exception as e:
-        print(f"Failed to send email to {guest.email}: {str(e)}")
+        # Log the error with the proper guest email
+        logging.error(f"Failed to send email to {guest_email_utf8}: {str(e)}")
         return False
+
+
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -112,40 +131,62 @@ app.config['UPLOAD_FOLDER'] = os.path.join('static', 'uploads')
 def create_invitation():
     if request.method == 'POST':
         event_name = request.form['event_name']
-        event_date = datetime.strptime(request.form['event_date'], '%Y-%m-%d')
+        try:
+            event_date = datetime.strptime(request.form['event_date'], '%Y-%m-%d')
+        except ValueError:
+            flash('Invalid date format. Please use YYYY-MM-DD.', 'error')
+            return redirect(url_for('create_invitation'))
+
         description = request.form['description']
         location = request.form['location']
         theme = request.form['theme']
         image = request.files.get('image')
-        
-        if image and image.filename != '':
-            filename = secure_filename(image.filename)
-            os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-            image_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            image.save(image_path)
-            image_path = os.path.join('uploads', filename)
-        else:
-            image_path = None
-        
+
+        # Form validation
+        if not event_name or not event_date or not location:
+            flash('Event name, date, and location are required.', 'error')
+            return redirect(url_for('create_invitation'))
+
+        # Handle image upload
+        try:
+            if image and image.filename != '':
+                filename = secure_filename(image.filename)
+                os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+                image_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+                image.save(image_path)
+            else:
+                image_path = None
+        except Exception as e:
+            flash('Error uploading the image. Please try again.', 'error')
+            return redirect(url_for('create_invitation'))
+
+        # Create new invitation
         invitation = Invitation(user_id=current_user.id, event_name=event_name, event_date=event_date, 
                                 image_path=image_path, description=description, location=location, theme=theme)
         db.session.add(invitation)
         db.session.commit()
-        
+
         # Process guest list
-        guest_list = request.form.get('guest_list', '')
-        guests = re.findall(r'([^,\n]+),\s*([^,\n]+@[^,\n]+)', guest_list)
+        guest_list = request.form.get('guest_list', '').strip()
+        guests = re.split(r'[\n,]', guest_list)
         
-        for name, email in guests:
-            guest = Guest(invitation_id=invitation.id, name=name.strip(), email=email.strip())
-            db.session.add(guest)
-            db.session.commit()
-            send_invitation_email(invitation, guest)
+        for guest in guests:
+            name_email = guest.split(',')
+            if len(name_email) == 2:
+                name = name_email[0].strip()
+                email = name_email[1].strip()
+                if re.match(r'[^@]+@[^@]+\.[^@]+', email):  # Basic email validation
+                    guest_obj = Guest(invitation_id=invitation.id, name=name, email=email)
+                    db.session.add(guest_obj)
+                    send_invitation_email(invitation, guest_obj)
+        
+        db.session.commit()  # Commit once after processing all guests
         
         flash('Invitation created and emails sent successfully!')
         return redirect(url_for('dashboard'))
-    
+
     return render_template('create_invitation.html')
+
 
 @app.route('/edit_invitation/<int:invitation_id>', methods=['GET', 'POST'])
 @login_required
